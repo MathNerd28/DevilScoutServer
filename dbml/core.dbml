@@ -58,6 +58,10 @@ Table permission_types {
   id citext [not null]
   name text [not null]
   description text [not null, default: '']
+
+  indexes {
+    id [pk]
+  }
 }
 
 Table permissions {

@@ -62,7 +62,7 @@ Table notifications {
   topic citext [not null]
   title text [not null]
   body text
-  click_url text
+  url text
 
   indexes {
     id [pk]
@@ -71,4 +71,3 @@ Table notifications {
   }
 }
 Ref: notifications.type > notification_types.id [delete: restrict]
-

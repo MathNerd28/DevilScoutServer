@@ -72,7 +72,8 @@ CREATE TABLE "team_requests" (
 CREATE TABLE "permission_types" (
   "id" citext NOT NULL,
   "name" text NOT NULL,
-  "description" text NOT NULL DEFAULT ''
+  "description" text NOT NULL DEFAULT '',
+  PRIMARY KEY ("id")
 );
 
 CREATE TABLE "permissions" (
@@ -220,7 +221,7 @@ CREATE TABLE "frc_match_teams" (
 CREATE TABLE "frc_match_results" (
   "red_score" smallint NOT NULL,
   "blue_score" smallint NOT NULL,
-  "winner" frc_alliance,
+  "winner" frc_alliance_color,
   "match_key" citext NOT NULL,
   "score_breakdown" jsonb,
   PRIMARY KEY ("match_key")
@@ -509,7 +510,7 @@ ALTER TABLE "questions" ADD FOREIGN KEY ("season") REFERENCES "frc_seasons" ("ye
 
 ALTER TABLE "submissions" ADD FOREIGN KEY ("event_key", "scouted_team") REFERENCES "frc_event_teams" ("event_key", "team_num") ON DELETE RESTRICT;
 
-ALTER TABLE "submissions" ADD FOREIGN KEY ("match_key", "scouted_team") REFERENCES "frc_match_teams" ("match_key", "team_num") ON DELETE RESTRICT;
+ALTER TABLE "submissions" ADD FOREIGN KEY ("match_key") REFERENCES "frc_matches" ("key") ON DELETE RESTRICT;
 
 ALTER TABLE "submissions" ADD FOREIGN KEY ("scouting_team") REFERENCES "teams" ("number") ON DELETE SET NULL;
 

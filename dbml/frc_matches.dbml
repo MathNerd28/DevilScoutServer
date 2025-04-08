@@ -15,7 +15,7 @@ Enum frc_match_status {
 
 Table frc_matches {
   number smallint [not null]
-  is_replay boolean [not null, default: false]
+  is_replay boolean [not null]
   level frc_match_level [not null]
   status frc_match_status [not null]
   event_key citext [not null]
@@ -57,7 +57,7 @@ Ref: frc_match_teams.team_num > frc_teams.number [delete: cascade]
 Table frc_match_results {
   red_score smallint [not null]
   blue_score smallint [not null]
-  winner frc_alliance
+  winner frc_alliance_color
   match_key citext [not null]
   score_breakdown jsonb
 

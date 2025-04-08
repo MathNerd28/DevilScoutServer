@@ -120,7 +120,7 @@ Ref: frc_event_alliances.(team_num, event_key) > frc_event_teams.(team_num, even
 
 Table frc_event_announcements {
   posted_time timestamptz [not null]
-  is_resolved boolean [not null, default: false]
+  is_resolved boolean [not null]
   event_key citext [not null]
   id text [not null]
   message text [not null]

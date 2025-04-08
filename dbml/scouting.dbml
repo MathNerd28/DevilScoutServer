@@ -81,7 +81,7 @@ Table submissions {
   }
 }
 Ref: submissions.(event_key, scouted_team) > frc_event_teams.(event_key, team_num) [delete: restrict]
-Ref: submissions.(match_key, scouted_team) > frc_match_teams.(match_key, team_num) [delete: restrict]
+Ref: submissions.match_key > frc_matches.key [delete: restrict]
 Ref: submissions.scouting_team > teams.number [delete: set null]
 Ref: submissions.(scouting_team, scouting_user) > team_users.(team_num, user_id) // delete: set null (scouting_user)
 
