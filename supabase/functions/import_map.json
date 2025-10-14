@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "supabase": "jsr:@supabase/supabase-js@2",
+    "express": "npm:express@5",
+    "crypto": "node:crypto",
+    "buffer": "node:buffer",
+    "promise-pool": "npm:@supercharge/promise-pool"
+  }
+}
