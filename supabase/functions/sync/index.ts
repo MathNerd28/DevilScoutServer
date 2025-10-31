@@ -92,7 +92,7 @@ server.get("/sync/tba/status", async (_req: Request, res: Response) => {
   const result = await syncSingle(
     () => tbaFetch("/status"),
     (status) =>
-      supabase.schema("tba").from("api_status").upsert({ data: status }),
+      supabase.schema("tba").from("api_status").upsert({ id: 1, data: status }),
   );
   sendSyncResult(result, res);
 });
@@ -127,7 +127,12 @@ server.get("/sync/tba/teams", async (_req: Request, res: Response) => {
     .from("api_status")
     .select("data->max_team_page")
     .single();
-  const pages = Array((data!.max_team_page as number) + 1).keys(); // [0, 1, 2, ..., n]
+  if (!data) {
+    res.status(500).send("TBA status not in DB");
+    return;
+  }
+
+  const pages = Array((data.max_team_page as number) + 1).keys(); // [0, 1, 2, ..., n]
 
   const result = await syncBatch(
     pages,
@@ -172,7 +177,7 @@ server.get("/sync/tba/matches", async (req: Request, res: Response) => {
     res.status(400).send("Missing 'events' parameter");
     return;
   }
-  const eventKeys = eventsStr.split(',');
+  const eventKeys = eventsStr.split(",");
 
   const result = await syncBatch(
     eventKeys,

@@ -10,11 +10,13 @@ import { syncSingle } from "../_shared/sync.ts";
 const supabase = createSupabaseClient(true);
 
 const server = express();
-server.use(express.json({
-  verify: (req: Request, _res: Response, buf: Buffer) => {
-    (req as any).rawBody = buf;
+server.use(express.json(
+  {
+    verify: (req: Request, _res: Response, buf: Buffer) => {
+      (req as any).rawBody = buf;
+    },
   },
-}));
+));
 
 server.post("/webhooks/nexus", async (req: Request, res: Response) => {
   const authHeader = req.get("Nexus-Token") || "";
@@ -31,6 +33,10 @@ server.post("/webhooks/nexus", async (req: Request, res: Response) => {
     return;
   }
 
+  console.log(eventKey);
+  console.log(payload);
+  console.log(new Date(payload.dataAsOfTime).toISOString());
+
   const { error } = await supabase
     .schema("nexus")
     .from("event_data")
@@ -40,10 +46,12 @@ server.post("/webhooks/nexus", async (req: Request, res: Response) => {
       data_as_of_time: new Date(payload.dataAsOfTime).toISOString(),
     });
   if (error) {
+    console.log(error);
     res.status(500);
   } else {
     res.status(200);
   }
+  res.send();
 });
 
 function unauthorizedError(msg: string): never {
@@ -101,7 +109,6 @@ const tbaWebhookHandlers = new Map([
   ["alliance_selection", handleUnimplemented], // TODO: pull alliances
   ["awards_posted", handleUnimplemented], // TODO: update awards
   ["broadcast", handleUnimplemented], // TODO: maybe store announcements?
-
   ["upcoming_match", handleUnimplemented], // no new information for us; ignore
   ["starting_comp_level", handleUnimplemented], // no new information for us; ignore
   ["ping", handleUnimplemented], // unimplemented handler handles this perfectly
@@ -129,3 +136,5 @@ server.post("/webhooks/tba", async (req: Request, res: Response) => {
   const data = req.body.message_data;
   await handler(data, res);
 });
+
+server.listen(3000);

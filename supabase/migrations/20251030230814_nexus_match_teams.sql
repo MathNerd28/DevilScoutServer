@@ -1,75 +1,9 @@
--- These tables store raw data directly from Nexus, hardly touched
--- Nexus API v1: https:--frc.nexus/api/v1/docs
+set check_function_bodies = off;
 
-CREATE SCHEMA nexus;
-
-GRANT USAGE ON SCHEMA nexus TO service_role;
-GRANT ALL ON ALL TABLES IN SCHEMA nexus TO service_role;
-GRANT ALL ON ALL ROUTINES IN SCHEMA nexus TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA nexus TO service_role;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA nexus GRANT ALL ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA nexus GRANT ALL ON ROUTINES TO service_role;
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA nexus GRANT ALL ON SEQUENCES TO service_role;
-
-CREATE FUNCTION nexus.update_time() RETURNS TRIGGER
-  LANGUAGE plpgsql AS $$
-    BEGIN
-      IF NEW.delete_time IS NULL THEN
-        NEW.update_time := now();
-      END IF;
-
-      RETURN NEW;
-    END;
-  $$;
-
--- List of events currently active on Nexus
-CREATE TABLE nexus.events (
-  event_key text PRIMARY KEY,
-  data jsonb NOT NULL,
-  create_time timestamptz NOT NULL
-    DEFAULT now(),
-  update_time timestamptz NOT NULL
-    DEFAULT now(),
-  delete_time timestamptz
-);
-
-CREATE TRIGGER events_update_time BEFORE UPDATE ON nexus.events
-  FOR EACH ROW EXECUTE FUNCTION nexus.update_time();
-
-CREATE FUNCTION nexus.events_trigger() RETURNS TRIGGER
-  LANGUAGE plpgsql AS $$
-    BEGIN
-      UPDATE frc_events
-        SET has_nexus = TRUE
-        WHERE key = NEW.event_key;
-
-      -- TODO: use other data from this API?
-
-      RETURN NULL;
-    END;
-  $$;
-
-CREATE TRIGGER events_insert AFTER INSERT ON nexus.events
-  FOR EACH ROW EXECUTE FUNCTION nexus.events_trigger();
--- no update trigger yet
-
--- Event snapshots from Nexus
-CREATE TABLE nexus.event_data (
-  event_key text PRIMARY KEY,
-  data jsonb NOT NULL,
-  data_as_of_time timestamptz NOT NULL,
-  create_time timestamptz NOT NULL
-    DEFAULT now(),
-  update_time timestamptz NOT NULL
-    DEFAULT now(),
-  delete_time timestamptz
-);
-
-CREATE TRIGGER event_data_update_time BEFORE UPDATE ON nexus.event_data
-  FOR EACH ROW EXECUTE FUNCTION nexus.update_time();
-
-CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
-  LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION nexus.event_data_trigger()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
     BEGIN
       WITH nexus_announcements AS (
         SELECT
@@ -107,8 +41,8 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
         SELECT
           j->>'label' AS label,
           j->>'status' AS status,
-          TO_TIMESTAMP((j#>'{times,estimatedStartTime}')::bigint / 1000) AS nexus_estimated_time,
-          TO_TIMESTAMP((j#>'{times,estimatedQueueTime}')::bigint / 1000) AS nexus_queue_time,
+          TO_TIMESTAMP((j#>'{times,estimatedStartTime}')::bigint / 1000) AS start_time,
+          TO_TIMESTAMP((j#>'{times,estimatedQueueTime}')::bigint / 1000) AS queue_time,
           ARRAY(SELECT jsonb_array_elements_text(j->'redTeams')::smallint) AS red_teams,
           ARRAY(SELECT jsonb_array_elements_text(j->'blueTeams')::smallint) AS blue_teams
         FROM jsonb_array_elements(NEW.data->'matches') AS a(j)
@@ -139,7 +73,7 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
               WHEN nm.status = 'On deck' THEN 'queuing'::frc_match_status
               WHEN nm.status = 'On field' THEN 'on_field'::frc_match_status
             END
-          ) AS nexus_status,
+          ) AS status,
           nm.start_time,
           nm.queue_time,
           nm.red_teams,
@@ -167,7 +101,7 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
       WHEN NOT MATCHED BY TARGET
         THEN INSERT
         (
-          nexus_status,
+          status,
           level,
           set,
           number,
@@ -176,7 +110,7 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
           start_time,
           queue_time
         ) VALUES (
-          pm.nexus_status,
+          pm.status,
           pm.level,
           1,
           pm.number,
@@ -187,9 +121,15 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
         )
       WHEN MATCHED
         THEN UPDATE SET
-          nexus_status = pm.nexus_status,
+          status = (
+            CASE
+              WHEN fm.replay != pm.replay THEN pm.status
+              WHEN fm.status = 'score_posted' THEN fm.status
+              ELSE pm.status
+            END
+          ),
           replay = pm.replay,
-          start_time = pm.start_time, -- Nexus estimate is always more accurate than TBA estimate
+          start_time = pm.start_time,
           queue_time = pm.queue_time
       WHEN NOT MATCHED BY SOURCE
         AND fm.event_key = NEW.event_key
@@ -251,67 +191,7 @@ CREATE FUNCTION nexus.event_data_trigger() RETURNS TRIGGER
 
       RETURN NULL;
     END;
-  $$;
+  $function$
+;
 
-CREATE TRIGGER event_data_insert AFTER INSERT ON nexus.event_data
-  FOR EACH ROW EXECUTE FUNCTION nexus.event_data_trigger();
-CREATE TRIGGER event_data_update AFTER UPDATE OF data ON nexus.event_data
-  FOR EACH ROW EXECUTE FUNCTION nexus.event_data_trigger();
 
-CREATE TABLE nexus.pit_maps (
-  event_key text PRIMARY KEY,
-  data jsonb NOT NULL,
-  create_time timestamptz NOT NULL
-    DEFAULT now(),
-  update_time timestamptz NOT NULL
-    DEFAULT now(),
-  delete_time timestamptz
-);
-
-CREATE TRIGGER pit_maps_update_time BEFORE UPDATE ON nexus.pit_maps
-  FOR EACH ROW EXECUTE FUNCTION nexus.update_time();
-
--- TODO: pit maps in usable format
-
-CREATE TABLE nexus.pit_addresses (
-  event_key text PRIMARY KEY,
-  data jsonb NOT NULL,
-  create_time timestamptz NOT NULL
-    DEFAULT now(),
-  update_time timestamptz NOT NULL
-    DEFAULT now(),
-  delete_time timestamptz
-);
-
-CREATE TRIGGER pit_addresses_update_time BEFORE UPDATE ON nexus.pit_addresses
-  FOR EACH ROW EXECUTE FUNCTION nexus.update_time();
-
-CREATE FUNCTION nexus.pit_addresses_trigger() RETURNS TRIGGER
-  LANGUAGE plpgsql AS $$
-    BEGIN
-      WITH nexus_pits AS (
-        SELECT
-          k::smallint AS team_num,
-          v::text AS pit_address
-        FROM jsonb_each(NEW.data) AS a(k, v)
-      )
-      MERGE INTO frc_event_teams fet
-        USING nexus_pits np ON
-          fet.event_key = NEW.event_key AND
-          fet.team_num = np.team_num
-      WHEN MATCHED
-        THEN UPDATE SET
-          pit_address = np.pit_address
-      WHEN NOT MATCHED BY SOURCE
-        AND fet.event_key = NEW.event_key
-        THEN UPDATE SET
-          pit_address = NULL;
-
-      RETURN NULL;
-    END;
-  $$;
-
-CREATE TRIGGER pit_addresses_insert AFTER INSERT ON nexus.pit_addresses
-  FOR EACH ROW EXECUTE FUNCTION nexus.pit_addresses_trigger();
-CREATE TRIGGER pit_addresses_update AFTER UPDATE OF data ON nexus.pit_addresses
-  FOR EACH ROW EXECUTE FUNCTION nexus.pit_addresses_trigger();

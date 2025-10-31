@@ -46,12 +46,14 @@ CREATE TRIGGER etags_update_time BEFORE UPDATE ON tba.etags
 
 -- /status
 -- Stores the TBA "API_Status" object
--- Only one row
+-- Only one row; ID is always 1
 CREATE TABLE tba.api_status (
   create_time timestamptz NOT NULL
     DEFAULT now(),
   update_time timestamptz NOT NULL
     DEFAULT now(),
+  id smallint PRIMARY KEY
+    DEFAULT 1,
   delete_time timestamptz,
   data jsonb NOT NULL
 );
@@ -241,12 +243,64 @@ CREATE TABLE tba.matches (
 CREATE TRIGGER matches_update_time BEFORE UPDATE ON tba.matches
   FOR EACH ROW EXECUTE FUNCTION tba.update_time();
 
+CREATE FUNCTION jsonb_flatten(data jsonb, prefix text DEFAULT NULL)
+RETURNS TABLE(path text, value jsonb)
+LANGUAGE plpgsql AS $$
+  BEGIN
+    FOR path, value IN (
+      SELECT
+        COALESCE(prefix, '') || '/' || e.key AS path,
+        e.val AS value
+      FROM jsonb_each(data) AS e(key, val)
+    )
+    LOOP
+      CASE jsonb_typeof(value)
+        -- recurse into nested objects
+        WHEN 'object' THEN RETURN QUERY
+          SELECT * FROM jsonb_flatten(value, path);
+
+        -- recurse into nested array elements, indexing from 1
+        WHEN 'array' THEN RETURN QUERY
+          SELECT * FROM jsonb_flatten_array(value, path);
+
+        -- otherwise, primitive leaf node
+        ELSE RETURN NEXT;
+      END CASE;
+    END LOOP;
+  END;
+$$;
+
+CREATE FUNCTION jsonb_flatten_array(data jsonb, prefix text DEFAULT NULL)
+RETURNS TABLE(path text, value jsonb)
+LANGUAGE plpgsql AS $$
+  BEGIN
+    FOR path, value IN (
+      SELECT
+        COALESCE(prefix, '') || '/' || e.index AS path,
+        e.val AS value
+      FROM jsonb_array_elements(data) WITH ORDINALITY AS e(val, index)
+    )
+    LOOP
+      -- copy the same case block as above
+      CASE jsonb_typeof(value)
+        WHEN 'object' THEN RETURN QUERY
+          SELECT * FROM jsonb_flatten(value, path);
+
+        WHEN 'array' THEN RETURN QUERY
+          SELECT * FROM jsonb_flatten_array(value, path);
+
+        ELSE RETURN NEXT;
+      END CASE;
+    END LOOP;
+  END;
+$$;
+
 CREATE FUNCTION tba.matches_trigger() RETURNS TRIGGER
   LANGUAGE plpgsql AS $$
     DECLARE
       is_de boolean;
+      match_key_data text;
       comp_level CONSTANT text := NEW.data->>'comp_level';
-      winning_alliance CONSTANT text := NEW.data->>'winning_alliance';
     BEGIN
       SELECT
         -- https://github.com/the-blue-alliance/the-blue-alliance/blob/py3/pwa/app/lib/api/PlayoffType.ts
@@ -254,55 +308,184 @@ CREATE FUNCTION tba.matches_trigger() RETURNS TRIGGER
         FROM tba.events e
         WHERE e.event_key = NEW.data->>'event_key';
 
-      INSERT INTO frc_matches
-      (
-        status,
-        level,
-        set,
-        number,
-        event_key,
-        scheduled_time,
-        start_time,
-        red_score,
-        blue_score,
-        winner
-      ) VALUES (
-        CASE
-          WHEN NEW.data#>>'{alliances,red,score}' IS NOT NULL THEN 'score_posted'::frc_match_status
-          ELSE 'scheduled'::frc_match_status
-        END,
-        CASE
-          WHEN comp_level = 'sf' AND is_de THEN 'playoff'::frc_match_level
-          WHEN comp_level = 'sf' THEN 'semifinal'::frc_match_level
-          WHEN comp_level = 'qf' THEN 'quarterfinal'::frc_match_level
-          WHEN comp_level = 'ef' THEN 'eighthfinal'::frc_match_level
-          WHEN comp_level = 'f' THEN 'final'::frc_match_level
-          WHEN comp_level = 'qm' THEN 'qualification'::frc_match_level
-        END,
-        CASE
-          WHEN comp_level = 'sf' AND is_de THEN 1
-          ELSE (NEW.data->>'set_number')::smallint
-        END,
-        CASE
-          WHEN comp_level = 'sf' AND is_de THEN (NEW.data->'set_number')::smallint
-          ELSE (NEW.data->>'match_number')::smallint
-        END,
-        NEW.data->>'event_key',
-        TO_TIMESTAMP((NEW.data->'time')::bigint),
-        TO_TIMESTAMP((NEW.data->'actual_time')::bigint),
-        (NEW.data#>>'{alliances,red,score}')::smallint,
-        (NEW.data#>>'{alliances,blue,score}')::smallint,
-        CASE
-          WHEN winning_alliance = 'red' THEN 'red'::frc_alliance_color
-          WHEN winning_alliance = 'blue' THEN 'blue'::frc_alliance_color
-          ELSE NULL
-        END
+      WITH processed_match AS (
+        SELECT
+          (
+            CASE
+              WHEN NEW.data#>>'{alliances,red,score}' IS NOT NULL THEN 'score_posted'::frc_match_status
+              ELSE 'scheduled'::frc_match_status
+            END
+          ) AS tba_status,
+          (
+            CASE comp_level
+              WHEN 'sf' THEN
+                CASE is_de
+                  WHEN TRUE THEN 'playoff'::frc_match_level
+                  ELSE 'semifinal'::frc_match_level
+                END
+              WHEN 'qf' THEN 'quarterfinal'::frc_match_level
+              WHEN 'ef' THEN 'octofinal'::frc_match_level
+              WHEN 'f' THEN 'final'::frc_match_level
+              WHEN 'qm' THEN 'qualification'::frc_match_level
+            END
+          ) AS level,
+          (
+            CASE
+              WHEN comp_level = 'sf' AND is_de THEN 1
+              ELSE (NEW.data->>'set_number')::smallint
+            END
+          ) AS set,
+          (
+            CASE
+              WHEN comp_level = 'sf' AND is_de THEN (NEW.data->'set_number')::smallint
+              ELSE (NEW.data->>'match_number')::smallint
+            END
+          ) AS number,
+          NEW.data->>'event_key' AS event_key,
+          TO_TIMESTAMP((NEW.data->>'time')::bigint) AS scheduled_time,
+          TO_TIMESTAMP((NEW.data->>'predicted_time')::bigint) AS predicted_time,
+          TO_TIMESTAMP((NEW.data->>'actual_time')::bigint) AS actual_time,
+          (NEW.data#>>'{alliances,red,score}')::smallint AS red_score,
+          (NEW.data#>>'{alliances,blue,score}')::smallint AS blue_score,
+          (
+            CASE NEW.data->>'winning_alliance'
+              WHEN 'blue' THEN 'blue'::frc_alliance_color
+              WHEN 'red' THEN 'red'::frc_alliance_color
+              ELSE NULL -- can be empty string
+            END
+          ) AS winner
       )
-      ON CONFLICT (key) DO UPDATE SET
-        start_time = EXCLUDED.start_time,
-        red_score = EXCLUDED.red_score,
-        blue_score = EXCLUDED.blue_score,
-        winner = EXCLUDED.winner;
+      MERGE INTO frc_matches fm
+        USING processed_match pm ON
+          fm.event_key = pm.event_key AND
+          fm.level = pm.level AND
+          fm.set = pm.set AND
+          fm.number = pm.number
+      WHEN NOT MATCHED BY TARGET
+        THEN INSERT (
+          tba_status,
+          level,
+          set,
+          number,
+          event_key,
+          tba_scheduled_time,
+          tba_estimated_time,
+          tba_actual_time,
+          red_score,
+          blue_score,
+          winner
+        ) VALUES (
+          pm.tba_status,
+          pm.level,
+          pm.set,
+          pm.number,
+          pm.event_key,
+          pm.scheduled_time,
+          pm.predicted_time,
+          pm.actual_time,
+          pm.red_score,
+          pm.blue_score,
+          pm.winner
+        )
+      WHEN MATCHED THEN UPDATE SET
+        tba_status = pm.tba_status,
+        tba_scheduled_time = pm.scheduled_time,
+        tba_estimated_time = pm.estimated_time,
+        tba_actual_time = pm.actual_time,
+        red_score = pm.red_score,
+        blue_score = pm.blue_score,
+        winner = pm.winner
+      WHEN NOT MATCHED BY SOURCE
+        THEN DO NOTHING -- only processing one match
+      RETURNING pm.key INTO match_key_data;
+
+      WITH match_teams AS (
+        SELECT
+          'red'::frc_alliance_color AS alliance,
+          SUBSTRING(u.team_key FROM '\d+')::smallint AS team_num,
+          u.station,
+          (NEW.data#>'{alliances,red,dq_team_keys}') ? u.team_key AS is_disqualified,
+          (NEW.data#>'{alliances,red,surrogate_team_keys}') ? u.team_key AS is_surrogate
+        FROM
+          jsonb_array_elements_text(NEW.data#>'{alliances,red,team_keys}') WITH ORDINALITY AS u(team_key, station)
+        WHERE u.team_key IS NOT NULL
+        UNION
+        SELECT
+          'blue'::frc_alliance_color AS alliance,
+          SUBSTRING(u.team_key FROM '\d+')::smallint AS team_num,
+          u.station,
+          (NEW.data#>'{alliances,blue,dq_team_keys}') ? u.team_key AS is_disqualified,
+          (NEW.data#>'{alliances,blue,surrogate_team_keys}') ? u.team_key AS is_surrogate
+        FROM
+          jsonb_array_elements_text(NEW.data#>'{alliances,blue,team_keys}') WITH ORDINALITY AS u(team_key, station)
+        WHERE u.team_key IS NOT NULL
+      )
+      MERGE INTO frc_match_teams ft
+        USING match_teams mt ON
+          ft.match_key = match_key_data AND
+          ft.alliance = mt.alliance AND
+          ft.station = mt.station
+      WHEN NOT MATCHED BY TARGET
+        THEN INSERT (
+          match_key,
+          team_num,
+          station,
+          alliance,
+          is_surrogate,
+          is_disqualified
+        ) VALUES (
+          match_key_data,
+          mt.team_num,
+          mt.station,
+          mt.alliance,
+          mt.is_surrogate,
+          mt.is_disqualified
+        )
+      WHEN MATCHED
+        THEN UPDATE SET
+          team_num = mt.team_num,
+          is_surrogate = mt.is_surrogate,
+          is_disqualified = mt.is_disqualified
+      WHEN NOT MATCHED BY SOURCE
+        AND ft.match_key = match_key_data
+        THEN DO NOTHING;
+
+      WITH score_breakdown AS (
+        SELECT
+          'red'::frc_alliance_color AS alliance,
+          b.path,
+          b.value
+        FROM jsonb_flatten(NEW.data#>'{score_breakdown,red}') AS b(path, value)
+        UNION
+        SELECT
+          'blue'::frc_alliance_color AS alliance,
+          b.path,
+          b.value
+        FROM jsonb_flatten(NEW.data#>'{score_breakdown,blue}') AS b(path, value)
+      )
+      MERGE INTO frc_match_breakdowns fb
+        USING score_breakdown sb ON
+          fb.match_key = match_key_data AND
+          fb.alliance = sb.alliance AND
+          fb.path = sb.path
+      WHEN NOT MATCHED BY TARGET
+        THEN INSERT (
+          match_key,
+          alliance,
+          path,
+          data
+        ) VALUES (
+          match_key_data,
+          sb.alliance,
+          sb.path,
+          sb.value
+        )
+      WHEN MATCHED
+        THEN UPDATE SET
+          data = sb.value
+      WHEN NOT MATCHED BY SOURCE
+        AND fb.match_key = match_key_data
+        THEN DELETE;
 
       RETURN NULL;
     END;

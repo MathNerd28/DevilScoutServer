@@ -100,18 +100,20 @@ CREATE TABLE submissions (
     DEFAULT auth.uid(),
   scouting_team smallint
     REFERENCES teams ON DELETE SET NULL,
-  event_key citext
-    REFERENCES frc_events ON DELETE SET NULL,
+  event_key citext NOT NULL
+    REFERENCES frc_events ON DELETE RESTRICT,
   match_key citext
     REFERENCES frc_matches ON DELETE SET NULL,
-  match_replay smallint,
+  match_replay smallint NOT NULL,
 
   CHECK ((match_key IS NULL) = (category = 'pit')),
   FOREIGN KEY (event_key, scouted_team)
-    REFERENCES frc_event_teams ON DELETE SET NULL (event_key),
-  FOREIGN KEY (scouting_team, scouting_user)
-    REFERENCES team_users (team_num, user_id) ON DELETE SET NULL (scouting_user)
+    REFERENCES frc_event_teams ON DELETE SET NULL (event_key)
+  -- FOREIGN KEY (scouting_team, scouting_user)
+  --   REFERENCES team_users (team_num, user_id) ON DELETE SET NULL (scouting_user)
 );
+
+CREATE INDEX ON submissions (scouted_team, match_key);
 
 -- Scouting submission data tables
 
@@ -147,7 +149,7 @@ CREATE FUNCTION submissions_data_integer_validate() RETURNS TRIGGER
 
       SELECT * INTO parameters
         FROM questions_integer qi
-        WHERE q.id = NEW.question_id;
+        WHERE qi.question_id = NEW.question_id;
 
       -- ensure season & category match
       IF submission.season != question.season OR submission.category != question.category THEN

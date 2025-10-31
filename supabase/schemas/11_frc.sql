@@ -7,18 +7,19 @@ CREATE TYPE frc_match_level AS ENUM (
   'practice',
   'qualification',
   'playoff',
-  'eighthfinal',
+  'octofinal',
   'quarterfinal',
   'semifinal',
   'final'
 );
 
 CREATE TYPE frc_match_status AS ENUM (
+  -- NOT guaranteed to progress in order
   'scheduled', -- the default state
-  'queuing',   -- the match has been queued (combines queuing and on_deck)
-  'on_field', -- the match is running (on_field)
-  'score_posted' -- the score has been posted on TBA
-  -- replays: go back to scheduled/queuing
+  'queuing',   -- the match has been queued (Nexus only)
+  'on_deck',   -- the match is on deck (Nexus only)
+  'on_field', -- the match is ready/running (Nexus only)
+  'score_posted' -- the score has been posted on TBA (TBA only)
 );
 
 CREATE TYPE frc_alliance_color AS ENUM (
@@ -220,6 +221,8 @@ CREATE TABLE frc_announcements (
   message text NOT NULL
 );
 
+DROP TABLE IF EXISTS frc_matches;
+
 -- match keys are formatted as follows:
 -- - event key (same as TBA/Nexus) followed by an underscore _
 -- - match type:
@@ -252,8 +255,6 @@ CREATE TABLE frc_announcements (
 -- Nexus can increment replay
 -- If event uses Nexus, then Nexus controls the times completely
 CREATE TABLE frc_matches (
-  status frc_match_status NOT NULL
-    DEFAULT 'scheduled',
   level frc_match_level NOT NULL,
   set smallint NOT NULL,
   number smallint NOT NULL,
@@ -267,7 +268,7 @@ CREATE TABLE frc_matches (
           WHEN level = 'practice' THEN 'p'
           WHEN level = 'qualification' THEN 'q'
           WHEN level = 'playoff' THEN 'pf'
-          WHEN level = 'eighthfinal' THEN 'ef'
+          WHEN level = 'octofinal' THEN 'of'
           WHEN level = 'quarterfinal' THEN 'qf'
           WHEN level = 'semifinal' THEN 'sf'
           WHEN level = 'final' THEN 'f'
@@ -282,14 +283,16 @@ CREATE TABLE frc_matches (
   label text NOT NULL
     GENERATED ALWAYS AS (
       (
-        CASE
-          WHEN level = 'practice' THEN 'Practice ' || number::text
-          WHEN level = 'qualification' THEN 'Qualification ' || number::text
-          WHEN level = 'playoff' THEN 'Playoff ' || number::text
-          WHEN level = 'final' THEN 'Final ' || number::text
-          WHEN level = 'eighthfinal' THEN 'Eighth-Final ' || set::text || '-' || number::text
-          WHEN level = 'quarterfinal' THEN 'Quarterfinal ' || set::text || '-' || number::text
-          WHEN level = 'semifinal' THEN 'Semifinal ' || set::text || '-' || number::text
+        CASE level
+          -- These all (probably) have only one set
+          WHEN 'practice' THEN 'Practice ' || number::text
+          WHEN 'qualification' THEN 'Qualification ' || number::text
+          WHEN 'playoff' THEN 'Playoff ' || number::text
+          WHEN 'final' THEN 'Final ' || number::text
+          -- These can sometimes have multiple sets
+          WHEN 'octofinal' THEN 'Octofinal ' || set::text || '-' || number::text
+          WHEN 'quarterfinal' THEN 'Quarterfinal ' || set::text || '-' || number::text
+          WHEN 'semifinal' THEN 'Semifinal ' || set::text || '-' || number::text
           ELSE '???'
         END
       ) || (
@@ -302,10 +305,16 @@ CREATE TABLE frc_matches (
     ) STORED,
   replay smallint NOT NULL
     DEFAULT 0,
+  score_counter smallint NOT NULL,
+  tba_status frc_match_status,
+  nexus_status frc_match_status,
 
-  scheduled_time timestamptz,
-  queue_time timestamptz,
-  start_time timestamptz,
+  tba_scheduled_time timestamptz,
+  tba_estimated_time timestamptz,
+  tba_actual_time timestamptz,
+  nexus_scheduled_time timestamptz,
+  nexus_estimated_time timestamptz,
+  nexus_queue_time timestamptz,
 
   red_score smallint,
   blue_score smallint,
@@ -313,6 +322,38 @@ CREATE TABLE frc_matches (
 
   UNIQUE (event_key, level, set, number)
 );
+
+CREATE FUNCTION frc_matches_check_score_counter() RETURNS TRIGGER
+  LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF (
+          NEW.red_score IS NOT NULL OR
+          NEW.blue_score IS NOT NULL OR
+          NEW.winner IS NOT NULL
+        ) THEN
+          NEW.score_counter := 1;
+        ELSE
+          NEW.score_counter := 0;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF (
+          (NEW.red_score IS DISTINCT FROM OLD.red_score) OR
+          (NEW.blue_score IS DISTINCT FROM OLD.blue_score) OR
+          (NEW.winner IS DISTINCT FROM OLD.winner)
+        ) THEN
+          NEW.score_counter := OLD.score_counter + 1;
+        ELSE
+          NEW.score_counter := OLD.score_counter;
+        END IF;
+      END IF;
+    END;
+  $$;
+
+REVOKE EXECUTE ON FUNCTION frc_matches_check_score_counter FROM public, anon, authenticated;
+
+CREATE TRIGGER frc_matches_score_counter_trigger BEFORE INSERT OR UPDATE ON frc_matches
+  FOR EACH ROW EXECUTE FUNCTION frc_matches_check_score_counter();
 
 -- Teams in a match
 -- Synced from both TBA and Nexus
@@ -332,7 +373,7 @@ CREATE TABLE frc_match_teams (
   PRIMARY KEY (match_key, alliance, station)
 );
 
-CREATE INDEX ON frc_match_teams (team_num, match_key);
+CREATE INDEX ON frc_match_teams (team_num, match_key, alliance);
 
 -- Match breakdowns
 -- Synced from TBA
@@ -341,13 +382,14 @@ CREATE TABLE frc_match_breakdowns (
   match_key citext NOT NULL
     REFERENCES frc_matches ON DELETE CASCADE,
   alliance frc_alliance_color NOT NULL,
-  score_breakdown jsonb NOT NULL,
+  path text NOT NULL,
+  data jsonb NOT NULL,
 
-  PRIMARY KEY (match_key, alliance)
+  PRIMARY KEY (match_key, alliance, path)
 );
 
 CREATE INDEX ON frc_match_breakdowns
-  USING GIN(score_breakdown jsonb_ops);
+  USING gin (path gin_trgm_ops);
 
 -- Match videos
 -- Synced from TBA

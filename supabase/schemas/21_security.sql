@@ -28,7 +28,7 @@ CREATE FUNCTION is_user_on_same_team(id_user uuid) RETURNS boolean STRICT
 -- Restrict everything by default
 -- Only grant specific permissions
 
--- functions in public are meant to be executed by users
+-- functions in public are usually meant to be executed by users
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public
   FROM public, anon;
 
